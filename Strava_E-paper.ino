@@ -198,7 +198,7 @@ static void pmu_init()
     Serial.println("  ALDO1-4 actives a 3.3V");
 }
 
-// ── Init afficheur (séquence identique à l'application IBIS) ─────────────────
+// ── Init afficheur ───────────────────────────────────────────────────────────
 static void epd_wait_busy()
 {
     Serial.print("  BUSY");
