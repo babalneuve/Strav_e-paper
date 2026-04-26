@@ -98,6 +98,21 @@ L'appareil utilise le **deep sleep** de l'ESP32 pour maximiser l'autonomie. `set
 
 **Autonomie estimée** : quelques mois sur batterie 2000 mAh (consommation en sleep ~200 µA).
 
+## Flash
+
+Procédure pour passer la carte en mode bootloader et uploader un nouveau firmware depuis Arduino IDE :
+
+1. **Éteindre** la carte
+2. **Maintenir** le bouton **BOOT** appuyé pendant 5 secondes
+3. **Appuyer** sur le bouton **POWER** (sans relâcher BOOT)
+4. **Relâcher** le bouton **BOOT**
+
+Si la manipulation a réussi, la LED power reste **allumée en continu** (sans clignoter) — la carte est en mode bootloader et attend le transfert.
+
+5. Dans Arduino IDE, sélectionner le bon port COM et cliquer sur **Upload**
+
+> **Note :** cette procédure est nécessaire car l'ESP32 est en deep sleep entre les réveils et ne répond pas aux requêtes d'upload automatiques via USB.
+
 ## Layout de l'écran
 
 ```
