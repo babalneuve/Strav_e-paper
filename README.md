@@ -7,10 +7,13 @@ Affiche la dernière activité Strava sur un écran e-paper 7.3" ACeP 7 couleurs
 L'appareil se connecte au Wi-Fi, interroge l'API Strava toutes les heures, et rafraîchit l'écran uniquement si une nouvelle activité est détectée. L'image est conservée sans alimentation grâce au mode hibernate de l'écran e-paper.
 
 **Informations affichées :**
-- Nom et type de l'activité (Course, Vélo, Natation…)
-- Date
-- Distance, durée, dénivelé positif, allure ou vitesse
-- Tracé GPS (Google Encoded Polyline) avec marqueurs départ/arrivée
+- Nom, type et date de l'activité
+- Distance et durée
+- Dénivelé positif
+- Allure moyenne et allure max (course à pied) — ou vitesse moyenne et vitesse max (vélo et autres)
+- Tracé GPS avec marqueurs départ (vert) / arrivée (rouge)
+- Profil altimétrique (distance vs altitude)
+- Date et heure du dernier check API (`MAJ: jj/mm HH:MM`)
 
 ## Matériel requis
 
@@ -65,6 +68,10 @@ Créer un fichier `secrets.h` à la racine du sketch (non versionné) :
 2. Récupérer `Client ID` et `Client Secret`
 3. Obtenir un `refresh_token` avec le scope `activity:read` via OAuth 2.0
 
+### Fuseau horaire
+
+Le fichier principal définit `TZ_OFFSET_SEC 7200` (CEST, UTC+2 — France heure d'été). Changer à `3600` en hiver (CET, UTC+1).
+
 ## Structure du projet
 
 ```
@@ -72,16 +79,37 @@ Strava_E-paper/
 ├── Strava_E-paper.ino   — sketch principal
 ├── pins.h               — définitions des broches
 ├── secrets.h            — credentials Wi-Fi + Strava (non commité)
+├── CLAUDE.md            — documentation technique du projet
 └── README.md
 ```
 
 ## Fonctionnement
 
-1. **Démarrage** : initialisation PMU → écran → Wi-Fi → API Strava → dessin
+1. **Démarrage** : initialisation PMU → écran → Wi-Fi → NTP → API Strava → dessin
 2. **Boucle** : vérification toutes les 60 minutes
-   - Nouvelle activité détectée → rafraîchissement de l'écran (~30-40 s)
+   - Nouvelle activité détectée (ID différent) → rafraîchissement de l'écran (~30-40 s)
    - Aucun changement → attente
-3. **Fallback cache** : si Wi-Fi ou API indisponible, affichage des dernières données sauvegardées en flash (NVS)
+3. **Fallback cache** : si Wi-Fi ou API indisponible, affichage des dernières données sauvegardées en flash (NVS) — tracé GPS et profil altitude non disponibles en mode cache
+
+## Layout de l'écran
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Strava  -  Derniere activite          (bandeau bleu)           │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│  Nom de l'activite                   │                                      │
+│  Type    Date                        │         Trace GPS                    │
+│ ─────────────────────               │    (marqueur depart vert,             │
+│ ┌────────────┐ ┌────────────┐        │     arrivee rouge)                   │
+│ │  DISTANCE  │ │   DUREE    │        │                                      │
+│ │  9.5 km    │ │  0:45:12   │        ├──────────────────────────────────────┤
+│ └────────────┘ └────────────┘        │  ▁▂▃▄▅▄▃▂▁  Profil altitude (bleu) │
+│ ┌────────┐ ┌────────┐ ┌────────┐    │                           MAJ: jj/mm │
+│ │DENIVE..│ │ ALLURE │ │ALL.MAX │    └──────────────────────────────────────┘
+│ │  85 m  │ │5'12"/km│ │4'45"/km│
+│ └────────┘ └────────┘ └────────┘
+└──────────────────────────────────────
+```
 
 ## Brochage
 

@@ -129,7 +129,7 @@ Sport "à pied" = Run, Walk, Hike → allure (min/km). Autre → vitesse (km/h).
 
 **Panneau droit :**
 - `y=78–292` : tracé GPS (h=215) avec marqueurs départ vert / arrivée rouge
-- `y=302–426` : profil altitude rempli en rouge (stream Strava `resolution=low`)
+- `y=302–426` : profil altitude rempli en bleu (stream Strava `resolution=low`)
 - `y=447` : timestamp `MAJ: jj/mm HH:MM` aligné à droite
 
 **Stream altitude :** appel séparé `GET /activities/{id}/streams?keys=altitude,distance&key_by_type=true&resolution=low` après `strava_fetch_last`. Maximum `MAX_STREAM_PTS=200` points.
