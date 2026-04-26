@@ -696,11 +696,11 @@ static void draw_activity(const Activity& act, const String& gpsError)
 
         // ── Panneau droit : profil altitude ───────────────────────────────────
         if (hasAlt) {
-            // Silhouette rouge remplie + contour noir
+            // Silhouette bleue remplie + contour noir
             for (int px = 0; px < altBufW; px++) {
                 int screenY = chartY + (chartH - 1 - altPyBuf[px]);
                 display.drawFastVLine(chartX + px, screenY,
-                                      chartY + chartH - screenY, GxEPD_RED);
+                                      chartY + chartH - screenY, GxEPD_BLUE);
                 if (px > 0) {
                     display.drawLine(
                         chartX + px - 1, chartY + (chartH - 1 - altPyBuf[px-1]),
@@ -779,7 +779,7 @@ static void draw_stat_box(int x, int y, int w, int h,
     const int lh = 30;
 
     display.drawRect(x, y, w, h, GxEPD_BLACK);
-    display.fillRect(x + 1, y + 1, w - 2, lh - 1, GxEPD_RED);
+    display.fillRect(x + 1, y + 1, w - 2, lh - 1, GxEPD_BLUE);
 
     display.setFont(&FreeMonoBold9pt7b);
     display.setTextColor(GxEPD_WHITE);
