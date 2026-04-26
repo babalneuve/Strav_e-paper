@@ -85,11 +85,18 @@ Strava_E-paper/
 
 ## Fonctionnement
 
-1. **Démarrage** : initialisation PMU → écran → Wi-Fi → NTP → API Strava → dessin
-2. **Boucle** : vérification toutes les 60 minutes
-   - Nouvelle activité détectée (ID différent) → rafraîchissement de l'écran (~30-40 s)
-   - Aucun changement → attente
-3. **Fallback cache** : si Wi-Fi ou API indisponible, affichage des dernières données sauvegardées en flash (NVS) — tracé GPS et profil altitude non disponibles en mode cache
+L'appareil utilise le **deep sleep** de l'ESP32 pour maximiser l'autonomie. `setup()` fait tout le travail ; `loop()` n'est jamais atteint.
+
+1. **Réveil** (démarrage initial ou réveil timer 24h)
+2. Initialisation PMU → Wi-Fi → NTP → API Strava
+3. Comparaison de l'ID de l'activité avec le cache NVS :
+   - **Nouvelle activité** → initialisation écran + redessin (~30-40 s)
+   - **Même activité** → pas de redessin (image conservée sur l'écran)
+   - **Wi-Fi indisponible + cache existant** → pas de redessin
+   - **Wi-Fi indisponible + aucun cache** → écran d'erreur
+4. Coupure des rails PMU, puis **deep sleep 24h**
+
+**Autonomie estimée** : quelques mois sur batterie 2000 mAh (consommation en sleep ~200 µA).
 
 ## Layout de l'écran
 

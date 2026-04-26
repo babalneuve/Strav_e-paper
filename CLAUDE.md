@@ -104,9 +104,22 @@ Les stats de la dernière activité réussie sont sauvegardées en flash via `Pr
 - La détection de nouvelle activité se fait par comparaison de l'`id` (int64_t) Strava
 - Le timestamp du dernier check API (`lastcheck`) est aussi sauvegardé séparément via `save_last_check()`
 
-## Refresh automatique
+## Deep sleep — réveil une fois par jour
 
-`check_and_refresh()` est appelée depuis `loop()` toutes les **60 minutes** (`REFRESH_INTERVAL_MIN`). Elle compare l'ID de l'activité reçue avec l'ID en cache ; `display_init()` est rappelée pour réveiller l'écran sorti de `hibernate()`.
+`setup()` fait tout le travail et se termine par `esp_deep_sleep_start()`. `loop()` n'est jamais atteint.
+
+- Durée du sleep : `SLEEP_DURATION_US = 24h` (en microsecondes)
+- Sur réveil, `esp_sleep_get_wakeup_cause()` distingue premier démarrage et réveil timer
+- Les rails ALDO1-4 du PMU sont désactivés avant le sleep via `pmu_disable_rails()` — l'écran retient son image sans alimentation après `hibernate()`
+- `display_init()` n'est appelé **que si** un redessin est nécessaire (nouvelle activité ou premier boot)
+
+**Logique de redessin :**
+- Nouvelle activité (ID différent du cache) → redessin
+- Même activité → sleep sans redessin
+- WiFi KO + cache existant → sleep sans redessin (image précédente conservée)
+- WiFi KO + aucun cache → écran d'erreur
+
+**Consommation estimée en deep sleep :** ~200 µA (ESP32 14 µA + PMU ~50 µA + reste). Sur batterie 2000 mAh ≈ plusieurs mois d'autonomie.
 
 ## Synchronisation NTP
 

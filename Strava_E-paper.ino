@@ -29,6 +29,7 @@
 #include <GxEPD2_7C.h>
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
+#include <esp_sleep.h>
 
 #include "pins.h"
 #include "secrets.h"
@@ -39,10 +40,9 @@ Preferences       prefs;
 GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT> display(
     GxEPD2_730c_GDEP073E01(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-#define REFRESH_INTERVAL_MIN  60
-#define REFRESH_INTERVAL_MS   (REFRESH_INTERVAL_MIN * 60UL * 1000UL)
-#define TZ_OFFSET_SEC         7200   // CEST (UTC+2, France heure d'ete)
-#define MAX_STREAM_PTS        200
+#define SLEEP_DURATION_US  (24ULL * 3600ULL * 1000000ULL)   // 24h en microsecondes
+#define TZ_OFFSET_SEC      7200    // CEST (UTC+2, France heure d'ete)
+#define MAX_STREAM_PTS     200
 
 struct Activity {
     int64_t id            = 0;
@@ -66,6 +66,7 @@ struct Pt     { int16_t x, y; };
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
 static void   pmu_init();
+static void   pmu_disable_rails();
 static void   epd_wait_busy();
 static void   epd_hardware_reset();
 static void   epd_deep_init();
@@ -79,7 +80,6 @@ static bool   strava_fetch_streams(const String& token, Activity& act);
 static void   save_activity_cache(const Activity& act);
 static void   save_last_check();
 static bool   load_activity_cache(Activity& act);
-static void   check_and_refresh();
 static void   draw_activity(const Activity& act, const String& gpsError = "");
 static void   draw_error(const char* line1, const char* line2 = "");
 static void   draw_stat_box(int x, int y, int w, int h, const char* label, const String& value);
@@ -96,10 +96,13 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
+static void   go_to_sleep();
 
-static unsigned long lastRefreshMs = 0;
-static String        lastCheckStr  = "";
+static String lastCheckStr = "";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Chaque réveil exécute setup() depuis le début — deep_sleep_start() à la fin.
+// loop() n'est jamais atteint en fonctionnement normal.
 // ─────────────────────────────────────────────────────────────────────────────
 void setup()
 {
@@ -107,85 +110,116 @@ void setup()
     unsigned long t0 = millis();
     while (!Serial && (millis() - t0) < 3000);
     delay(100);
-    Serial.println("\n=== Strava Last Activity — ESP32-S3-PhotoPainter ===");
+
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    bool fromSleep = (cause == ESP_SLEEP_WAKEUP_TIMER);
+    Serial.println(fromSleep
+        ? "\n=== Réveil deep sleep — Strava check ==="
+        : "\n=== Démarrage initial — Strava Last Activity ===");
 
     // ── LEDs ──────────────────────────────────────────────────────────────────
     pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
     pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
-    led_blink(LED_GREEN, 3, 150);
+    led_blink(LED_GREEN, fromSleep ? 1 : 3, 150);
 
     // ── Broches EPD — états initiaux avant tout init SPI ─────────────────────
     pinMode(EPD_RST,  OUTPUT); digitalWrite(EPD_RST, HIGH);
     pinMode(EPD_DC,   OUTPUT); digitalWrite(EPD_DC,  LOW);
     pinMode(EPD_CS,   OUTPUT); digitalWrite(EPD_CS,  HIGH);
     pinMode(EPD_BUSY, INPUT);
-    Serial.println("[OK] Broches EPD configurees");
 
     // ── PMU — alimente l'écran via ALDO1-4, doit précéder tout init SPI ──────
-    Serial.println("Init PMU...");
     pmu_init();
-    Serial.println("Stabilisation 2s...");
     delay(2000);
 
-    // ── Afficheur ─────────────────────────────────────────────────────────────
-    Serial.println("Init afficheur...");
-    display_init();
-    Serial.println("[OK] Afficheur pret");
+    // ── Lecture de l'état en cache ────────────────────────────────────────────
+    prefs.begin("strava_cache", true);
+    int64_t cachedId = prefs.getLong64("id", 0);
+    bool    hasCache = prefs.isKey("name");
+    lastCheckStr     = prefs.getString("lastcheck", "");
+    prefs.end();
+    Serial.print("  Cache : "); Serial.print(hasCache ? "OK" : "vide");
+    Serial.print("  ID: "); Serial.println((long long)cachedId);
 
     // ── WiFi + NTP + Strava ───────────────────────────────────────────────────
-    led_blink(LED_GREEN, 2, 100);
     Activity act;
+    bool     needDraw = false;
     String   gpsError = "";
 
     if (!wifi_connect()) {
-        gpsError = "WiFi impossible";
+        if (!hasCache) {
+            // Premier démarrage sans réseau : afficher l'erreur
+            gpsError = "WiFi impossible";
+            needDraw = true;
+        } else {
+            Serial.println("WiFi KO — cache disponible, pas de redessin");
+        }
     } else {
         String t = ntp_get_time_str();
         if (!t.isEmpty()) { lastCheckStr = t; save_last_check(); }
 
-        Serial.println("Token Strava...");
         String token = strava_get_token();
-
         if (token.isEmpty()) {
-            gpsError = "Token Strava invalide";
+            if (!hasCache) { gpsError = "Token Strava invalide"; needDraw = true; }
         } else {
-            Serial.println("Recuperation derniere activite...");
             if (!strava_fetch_last(token, act)) {
-                gpsError = "Erreur API Strava";
-            } else {
+                if (!hasCache) { gpsError = "Erreur API Strava"; needDraw = true; }
+            } else if (act.id != cachedId) {
+                Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
                 strava_fetch_streams(token, act);
                 save_activity_cache(act);
+                needDraw = true;
+            } else {
+                Serial.println("Meme activite (ID identique) — pas de redessin");
             }
         }
         wifi_disconnect();
     }
 
-    // Si erreur : tenter de charger les donnees en cache
-    if (!gpsError.isEmpty()) {
-        Serial.println("[WARN] " + gpsError + " — tentative cache...");
-        if (!load_activity_cache(act)) {
-            draw_error(gpsError.c_str(), "Aucune donnee en cache");
-            return;
+    // ── Redessin si nécessaire ────────────────────────────────────────────────
+    if (needDraw) {
+        Serial.println("Init afficheur...");
+        display_init();
+        led_blink(LED_GREEN, 2, 100);
+
+        if (!gpsError.isEmpty()) {
+            Activity cached;
+            if (!load_activity_cache(cached)) {
+                draw_error(gpsError.c_str(), "Aucune donnee en cache");
+            } else {
+                Serial.println("Affichage cache avec erreur reseau...");
+                draw_activity(cached, gpsError);
+            }
+        } else {
+            Serial.println("Dessin en cours (~30-40s)...");
+            draw_activity(act, "");
         }
-        Serial.println("[OK] Donnees en cache chargees");
+        Serial.println("[OK] Dessin termine — image conservee sans alimentation");
+        led_blink(LED_RED, 2, 200);
     }
 
-    Serial.println("Dessin en cours (~30-40s)...");
-    draw_activity(act, gpsError);
-    Serial.println("[OK] Dessin termine — image conservee sans alimentation");
-    led_blink(LED_RED, 2, 200);
-
-    lastRefreshMs = millis();
+    go_to_sleep();
 }
 
 void loop()
 {
-    if ((millis() - lastRefreshMs) >= REFRESH_INTERVAL_MS) {
-        lastRefreshMs = millis();
-        check_and_refresh();
-    }
-    led_blink(LED_GREEN, 1, 200);
-    delay(3000);
+    // Ne devrait jamais etre atteint — deep sleep dans setup()
+    delay(10000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+static void go_to_sleep()
+{
+    // Coupe les rails PMU : l'écran hiberné conserve son image sans alimentation
+    pmu_disable_rails();
+    SPI.end();
+
+    Serial.println("Deep sleep 24h...");
+    Serial.flush();
+    delay(100);
+
+    esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+    esp_deep_sleep_start();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,6 +243,17 @@ static void pmu_init()
     PMU.setALDO4Voltage(3300); PMU.enableALDO4();
     PMU.clearIrqStatus();
     Serial.println("  ALDO1-4 actives a 3.3V");
+}
+
+static void pmu_disable_rails()
+{
+    // Coupe les rails avant deep sleep pour minimiser la consommation
+    // L'écran retient son image après hibernate même sans alimentation
+    PMU.disableALDO1();
+    PMU.disableALDO2();
+    PMU.disableALDO3();
+    PMU.disableALDO4();
+    Serial.println("  ALDO1-4 desactives");
 }
 
 // ── Init afficheur ───────────────────────────────────────────────────────────
@@ -493,69 +538,16 @@ static bool load_activity_cache(Activity& act)
         act.max_speed_kph = prefs.getFloat ("maxspeed", 0);
         act.polyline      = "";
         act.stream_count  = 0;
-        lastCheckStr      = prefs.getString("lastcheck", "");
     }
     prefs.end();
     if (ok) Serial.println("[OK] Cache charge : " + act.name);
     return ok && act.name.length() > 0;
 }
 
-// ── Refresh automatique ───────────────────────────────────────────────────────
-static void check_and_refresh()
-{
-    Serial.println("=== Verification nouvelle activite ===");
-    led_blink(LED_GREEN, 2, 100);
-
-    prefs.begin("strava_cache", true);
-    int64_t cachedId = prefs.getLong64("id", 0);
-    prefs.end();
-    Serial.print("  ID en cache : "); Serial.println((long long)cachedId);
-
-    if (!wifi_connect()) {
-        Serial.println("[WARN] WiFi indisponible — refresh ignore");
-        return;
-    }
-
-    String t = ntp_get_time_str();
-    if (!t.isEmpty()) { lastCheckStr = t; save_last_check(); }
-
-    String token = strava_get_token();
-    if (token.isEmpty()) {
-        Serial.println("[WARN] Token invalide — refresh ignore");
-        wifi_disconnect();
-        return;
-    }
-
-    Activity act;
-    if (!strava_fetch_last(token, act)) {
-        Serial.println("[WARN] API Strava KO — refresh ignore");
-        wifi_disconnect();
-        return;
-    }
-
-    if (act.id == 0 || act.id == cachedId) {
-        Serial.println("Pas de nouvelle activite (ID identique)");
-        wifi_disconnect();
-        return;
-    }
-
-    Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
-    strava_fetch_streams(token, act);
-    wifi_disconnect();
-
-    save_activity_cache(act);
-
-    display_init();
-    Serial.println("Redessin en cours (~30-40s)...");
-    draw_activity(act, "");
-    Serial.println("[OK] Refresh termine");
-    led_blink(LED_RED, 3, 200);
-}
-
 // ── Dessin ───────────────────────────────────────────────────────────────────
 //
 // Layout 800x480 :
-//   y=  0- 74 : bandeau rouge header
+//   y=  0- 74 : bandeau bleu header
 //   x=  0-389 : panneau gauche — 5 boites stats
 //   x=390-391 : séparateur vertical
 //   x=392-799 : panneau droit — tracé GPS + profil altitude
@@ -571,7 +563,7 @@ static void check_and_refresh()
 //     y= 78-292 : tracé GPS (h=215)
 //     y=297-298 : séparateur horizontal
 //     y=302-426 : profil altitude (chartX=423, chartY=304, chartW=366, chartH=121)
-//     y=445     : date/heure dernier check API (bas droite)
+//     y=447     : date/heure dernier check API (bas droite)
 //
 static void draw_activity(const Activity& act, const String& gpsError)
 {
@@ -589,13 +581,12 @@ static void draw_activity(const Activity& act, const String& gpsError)
     Serial.print("  GPS points decoded: "); Serial.println(gpsPtCount);
 
     // ── Pre-calcul profil altitude ────────────────────────────────────────────
-    // Zone graphe : chartX=423 chartY=304 chartW=366 chartH=121
     const int altAX = 395, altAY = 302, altAW = 398, altAH = 125;
     const int altML = 28, altMT = 2, altMR = 4, altMB = 2;
     const int chartX = altAX + altML;
     const int chartY = altAY + altMT;
-    const int chartW = altAW - altML - altMR;   // 366
-    const int chartH = altAH - altMT - altMB;   // 121
+    const int chartW = altAW - altML - altMR;
+    const int chartH = altAH - altMT - altMB;
 
     static int16_t altPyBuf[400];
     int   altBufW = 0;
@@ -610,7 +601,7 @@ static void draw_activity(const Activity& act, const String& gpsError)
             if (act.alt_pts[i] > altMax) altMax = act.alt_pts[i];
         }
         float dAlt = altMax - altMin;
-        if (dAlt  < 1.0f)  dAlt  = 1.0f;
+        if (dAlt   < 1.0f)  dAlt   = 1.0f;
         if (maxDist < 1.0f) maxDist = 1.0f;
 
         altBufW = (chartW < 400) ? chartW : 400;
@@ -657,16 +648,16 @@ static void draw_activity(const Activity& act, const String& gpsError)
         display.drawFastHLine(10, 163, 370, GxEPD_BLACK);
 
         // Rang 1 : 2 boites (bw=179, bh=145, y=168)
-        const int  bx1[]    = { 10, 199 };
-        const char* lbl1[]  = { "DISTANCE", "DUREE" };
-        String      val1[]  = { fmt_dist(act.dist_km), fmt_time(act.moving_secs) };
+        const int   bx1[]  = { 10, 199 };
+        const char* lbl1[] = { "DISTANCE", "DUREE" };
+        String      val1[] = { fmt_dist(act.dist_km), fmt_time(act.moving_secs) };
         for (int i = 0; i < 2; i++)
             draw_stat_box(bx1[i], 168, 179, 145, lbl1[i], val1[i]);
 
         // Rang 2 : 3 boites (bw=116, bh=145, y=323)
-        const int  bx2[]    = { 10, 136, 262 };
-        const char* lbl2[]  = { "DENIVELE+", label4, label5 };
-        String      val2[]  = { fmt_elev(act.elevation_m), val4, val5 };
+        const int   bx2[]  = { 10, 136, 262 };
+        const char* lbl2[] = { "DENIVELE+", label4, label5 };
+        String      val2[] = { fmt_elev(act.elevation_m), val4, val5 };
         for (int i = 0; i < 3; i++)
             draw_stat_box(bx2[i], 323, 116, 145, lbl2[i], val2[i]);
 
@@ -696,7 +687,6 @@ static void draw_activity(const Activity& act, const String& gpsError)
 
         // ── Panneau droit : profil altitude ───────────────────────────────────
         if (hasAlt) {
-            // Silhouette bleue remplie + contour noir
             for (int px = 0; px < altBufW; px++) {
                 int screenY = chartY + (chartH - 1 - altPyBuf[px]);
                 display.drawFastVLine(chartX + px, screenY,
@@ -708,10 +698,8 @@ static void draw_activity(const Activity& act, const String& gpsError)
                         GxEPD_BLACK);
                 }
             }
-            // Axes du graphe
             display.drawFastVLine(chartX, chartY, chartH, GxEPD_BLACK);
             display.drawFastHLine(chartX, chartY + chartH - 1, chartW, GxEPD_BLACK);
-            // Labels min/max altitude (police par défaut 5x7)
             display.setFont(NULL);
             display.setTextColor(GxEPD_BLACK);
             char buf[10];
@@ -771,8 +759,6 @@ static void draw_error(const char* line1, const char* line2)
     display.hibernate();
 }
 
-// Boite stat : bandeau rouge (label) + zone blanche (valeur centrée)
-// Police valeur : 12pt pour bw>=150, 9pt pour boites plus etroites
 static void draw_stat_box(int x, int y, int w, int h,
                           const char* label, const String& value)
 {
@@ -790,7 +776,6 @@ static void draw_stat_box(int x, int y, int w, int h,
     print_centered(value, x, y + lh, w, h - lh);
 }
 
-// Centre un texte horizontalement et verticalement dans un rectangle
 static void print_centered(const String& text, int bx, int by, int bw, int bh)
 {
     int16_t x1, y1; uint16_t tw, th;
@@ -801,7 +786,6 @@ static void print_centered(const String& text, int bx, int by, int bw, int bh)
 }
 
 // ── GPS ───────────────────────────────────────────────────────────────────────
-
 static int decode_polyline(const String& enc, LatLng* pts, int maxPts)
 {
     int idx = 0, len = enc.length(), count = 0;
@@ -859,7 +843,6 @@ static void prepare_gps_pixels(const Activity& act, Pt* pixels, int& count,
     count = n;
 }
 
-// Interpolation lineaire de l'altitude pour une distance donnee (m)
 static float interp_altitude(const Activity& act, float dist_m)
 {
     if (act.stream_count < 2) return 0;
