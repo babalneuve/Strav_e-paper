@@ -633,8 +633,8 @@ static void draw_activity(const Activity& act, const String& gpsError)
         Serial.print("  Page "); Serial.println(++page);
         display.fillScreen(GxEPD_WHITE);
 
-        // ── Bandeau header rouge ───────────────────────────────────────────────
-        display.fillRect(0, 0, 800, 75, GxEPD_RED);
+        // ── Bandeau header bleu ────────────────────────────────────────────────
+        display.fillRect(0, 0, 800, 75, GxEPD_BLUE);
         display.setFont(&FreeMonoBold12pt7b);
         display.setTextColor(GxEPD_WHITE);
         print_centered("Strava  -  Derniere activite", 0, 8, 800, 67);
