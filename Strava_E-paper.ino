@@ -96,7 +96,7 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
-static void   strava_check(int64_t& cachedId, bool& hasCache);
+static void   strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw = false);
 static void   go_to_sleep();
 
 static String lastCheckStr = "";
@@ -149,8 +149,11 @@ void setup()
         while (digitalRead(BTN_KEY) == LOW) delay(10);
         delay(200);
         // Boucle — tourne jusqu'au prochain appui bouton
+        // Premiere iteration force un redessin pour confirmer que ca tourne
+        bool first = true;
         do {
-            strava_check(cachedId, hasCache);
+            strava_check(cachedId, hasCache, first);
+            first = false;
         } while (digitalRead(BTN_KEY) == HIGH);
         delay(50);
     } else {
@@ -167,10 +170,11 @@ void loop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-static void strava_check(int64_t& cachedId, bool& hasCache)
+static void strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw)
 {
     Activity act;
     bool     needDraw = false;
+    bool     useCache = false;  // forceRedraw mais act vide — charger depuis NVS
     String   gpsError = "";
 
     if (!wifi_connect()) {
@@ -178,7 +182,8 @@ static void strava_check(int64_t& cachedId, bool& hasCache)
             gpsError = "WiFi impossible";
             needDraw = true;
         } else {
-            Serial.println("WiFi KO — cache disponible, pas de redessin");
+            Serial.println("WiFi KO — cache disponible");
+            if (forceRedraw) { needDraw = true; useCache = true; }
         }
     } else {
         String t = ntp_get_time_str();
@@ -187,9 +192,11 @@ static void strava_check(int64_t& cachedId, bool& hasCache)
         String token = strava_get_token();
         if (token.isEmpty()) {
             if (!hasCache) { gpsError = "Token Strava invalide"; needDraw = true; }
+            else if (forceRedraw) { needDraw = true; useCache = true; }
         } else {
             if (!strava_fetch_last(token, act)) {
                 if (!hasCache) { gpsError = "Erreur API Strava"; needDraw = true; }
+                else if (forceRedraw) { needDraw = true; useCache = true; }
             } else if (act.id != cachedId) {
                 Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
                 strava_fetch_streams(token, act);
@@ -198,7 +205,9 @@ static void strava_check(int64_t& cachedId, bool& hasCache)
                 hasCache = true;
                 needDraw = true;
             } else {
-                Serial.println("Meme activite (ID identique) — pas de redessin");
+                Serial.println("Meme activite (ID identique)");
+                // act a les donnees API (polyline incluse) mais pas les streams
+                if (forceRedraw) needDraw = true;
             }
         }
         wifi_disconnect();
@@ -216,6 +225,12 @@ static void strava_check(int64_t& cachedId, bool& hasCache)
             } else {
                 Serial.println("Affichage cache avec erreur reseau...");
                 draw_activity(cached, gpsError);
+            }
+        } else if (useCache) {
+            Activity cached;
+            if (load_activity_cache(cached)) {
+                Serial.println("Redessin depuis cache...");
+                draw_activity(cached, "");
             }
         } else {
             Serial.println("Dessin en cours (~30-40s)...");
