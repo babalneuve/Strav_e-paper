@@ -96,7 +96,6 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
-static void   strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw = false);
 static void   go_to_sleep();
 
 static String lastCheckStr = "";
@@ -107,31 +106,21 @@ static String lastCheckStr = "";
 // ─────────────────────────────────────────────────────────────────────────────
 void setup()
 {
-    // ── LEDs en premier — nécessaire pour le signal d'attente moniteur série ──
-    pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
-    pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
+    Serial.begin(115200);
+    unsigned long t0 = millis();
+    while (!Serial && (millis() - t0) < 3000);
+    delay(100);
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool fromSleep  = (cause == ESP_SLEEP_WAKEUP_TIMER);
-    bool fromButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
+    bool fromSleep = (cause == ESP_SLEEP_WAKEUP_TIMER);
+    Serial.println(fromSleep
+        ? "\n=== Réveil deep sleep — Strava check ==="
+        : "\n=== Démarrage initial — Strava Last Activity ===");
 
-    Serial.begin(115200);
-    if (fromButton) {
-        // L'USB CDC perd la connexion en deep sleep — clignotement vert 5s
-        // pour laisser le temps de rouvrir le moniteur série dans l'IDE
-        for (int i = 0; i < 10; i++) {
-            digitalWrite(LED_GREEN, LOW);  delay(150);
-            digitalWrite(LED_GREEN, HIGH); delay(350);
-        }
-    }
-    unsigned long t0 = millis();
-    while (!Serial && (millis() - t0) < 2000);
-    delay(200);
-
-    Serial.println(fromButton ? "\n=== Réveil bouton KEY — Strava check ===" :
-                   fromSleep  ? "\n=== Réveil deep sleep — Strava check ===" :
-                                "\n=== Démarrage initial — Strava Last Activity ===");
-    led_blink(LED_GREEN, fromButton ? 2 : (fromSleep ? 1 : 3), 150);
+    // ── LEDs ──────────────────────────────────────────────────────────────────
+    pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
+    pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
+    led_blink(LED_GREEN, fromSleep ? 1 : 3, 150);
 
     // ── Broches EPD — états initiaux avant tout init SPI ─────────────────────
     pinMode(EPD_RST,  OUTPUT); digitalWrite(EPD_RST, HIGH);
@@ -152,47 +141,18 @@ void setup()
     Serial.print("  Cache : "); Serial.print(hasCache ? "OK" : "vide");
     Serial.print("  ID: "); Serial.println((long long)cachedId);
 
-    if (fromButton) {
-        // Attendre relachement du bouton de réveil avant de démarrer la boucle
-        pinMode(BTN_KEY, INPUT_PULLUP);
-        while (digitalRead(BTN_KEY) == LOW) delay(10);
-        delay(200);
-        // Boucle — tourne jusqu'au prochain appui bouton
-        // Premiere iteration force un redessin pour confirmer que ca tourne
-        bool first = true;
-        do {
-            strava_check(cachedId, hasCache, first);
-            first = false;
-        } while (digitalRead(BTN_KEY) == HIGH);
-        delay(50);
-    } else {
-        strava_check(cachedId, hasCache);
-    }
-
-    go_to_sleep();
-}
-
-void loop()
-{
-    // Ne devrait jamais etre atteint — deep sleep dans setup()
-    delay(10000);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-static void strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw)
-{
+    // ── WiFi + NTP + Strava ───────────────────────────────────────────────────
     Activity act;
     bool     needDraw = false;
-    bool     useCache = false;  // forceRedraw mais act vide — charger depuis NVS
     String   gpsError = "";
 
     if (!wifi_connect()) {
         if (!hasCache) {
+            // Premier démarrage sans réseau : afficher l'erreur
             gpsError = "WiFi impossible";
             needDraw = true;
         } else {
-            Serial.println("WiFi KO — cache disponible");
-            if (forceRedraw) { needDraw = true; useCache = true; }
+            Serial.println("WiFi KO — cache disponible, pas de redessin");
         }
     } else {
         String t = ntp_get_time_str();
@@ -201,27 +161,22 @@ static void strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw)
         String token = strava_get_token();
         if (token.isEmpty()) {
             if (!hasCache) { gpsError = "Token Strava invalide"; needDraw = true; }
-            else if (forceRedraw) { needDraw = true; useCache = true; }
         } else {
             if (!strava_fetch_last(token, act)) {
                 if (!hasCache) { gpsError = "Erreur API Strava"; needDraw = true; }
-                else if (forceRedraw) { needDraw = true; useCache = true; }
             } else if (act.id != cachedId) {
                 Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
                 strava_fetch_streams(token, act);
                 save_activity_cache(act);
-                cachedId = act.id;
-                hasCache = true;
                 needDraw = true;
             } else {
-                Serial.println("Meme activite (ID identique)");
-                // act a les donnees API (polyline incluse) mais pas les streams
-                if (forceRedraw) needDraw = true;
+                Serial.println("Meme activite (ID identique) — pas de redessin");
             }
         }
         wifi_disconnect();
     }
 
+    // ── Redessin si nécessaire ────────────────────────────────────────────────
     if (needDraw) {
         Serial.println("Init afficheur...");
         display_init();
@@ -235,12 +190,6 @@ static void strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw)
                 Serial.println("Affichage cache avec erreur reseau...");
                 draw_activity(cached, gpsError);
             }
-        } else if (useCache) {
-            Activity cached;
-            if (load_activity_cache(cached)) {
-                Serial.println("Redessin depuis cache...");
-                draw_activity(cached, "");
-            }
         } else {
             Serial.println("Dessin en cours (~30-40s)...");
             draw_activity(act, "");
@@ -248,21 +197,27 @@ static void strava_check(int64_t& cachedId, bool& hasCache, bool forceRedraw)
         Serial.println("[OK] Dessin termine — image conservee sans alimentation");
         led_blink(LED_RED, 2, 200);
     }
+
+    go_to_sleep();
 }
 
+void loop()
+{
+    // Ne devrait jamais etre atteint — deep sleep dans setup()
+    delay(10000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 static void go_to_sleep()
 {
     // Coupe les rails PMU : l'écran hiberné conserve son image sans alimentation
     pmu_disable_rails();
     SPI.end();
 
-    Serial.println("Deep sleep 24h (réveil possible via bouton KEY)...");
+    Serial.println("Deep sleep 24h...");
     Serial.flush();
     delay(100);
 
-    // Réveil par bouton KEY (GPIO 4, actif bas) ou par timer 24h
-    pinMode(BTN_KEY, INPUT_PULLUP);
-    esp_sleep_enable_ext1_wakeup(1ULL << BTN_KEY, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
     esp_deep_sleep_start();
 }
