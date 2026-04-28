@@ -96,6 +96,7 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
+static void   wait_for_button_press();
 static void   go_to_sleep();
 
 static String lastCheckStr = "";
@@ -112,15 +113,16 @@ void setup()
     delay(100);
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool fromSleep = (cause == ESP_SLEEP_WAKEUP_TIMER);
-    Serial.println(fromSleep
-        ? "\n=== Réveil deep sleep — Strava check ==="
-        : "\n=== Démarrage initial — Strava Last Activity ===");
+    bool fromSleep  = (cause == ESP_SLEEP_WAKEUP_TIMER);
+    bool fromButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
+    Serial.println(fromButton ? "\n=== Réveil bouton KEY — Strava check ===" :
+                   fromSleep  ? "\n=== Réveil deep sleep — Strava check ===" :
+                                "\n=== Démarrage initial — Strava Last Activity ===");
 
     // ── LEDs ──────────────────────────────────────────────────────────────────
     pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
     pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
-    led_blink(LED_GREEN, fromSleep ? 1 : 3, 150);
+    led_blink(LED_GREEN, fromButton ? 2 : (fromSleep ? 1 : 3), 150);
 
     // ── Broches EPD — états initiaux avant tout init SPI ─────────────────────
     pinMode(EPD_RST,  OUTPUT); digitalWrite(EPD_RST, HIGH);
@@ -198,6 +200,7 @@ void setup()
         led_blink(LED_RED, 2, 200);
     }
 
+    if (fromButton) wait_for_button_press();
     go_to_sleep();
 }
 
@@ -208,16 +211,35 @@ void loop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+static void wait_for_button_press()
+{
+    pinMode(BTN_KEY, INPUT_PULLUP);
+    Serial.println("Attente appui KEY pour retourner en sleep...");
+    // Attendre relachement si bouton encore enfonce apres le réveil
+    while (digitalRead(BTN_KEY) == LOW) delay(10);
+    delay(200);
+    // Clignotement lent LED verte = en attente
+    while (digitalRead(BTN_KEY) == HIGH) {
+        digitalWrite(LED_GREEN, LOW);  delay(100);
+        digitalWrite(LED_GREEN, HIGH); delay(900);
+    }
+    delay(50);
+    Serial.println("Bouton KEY — retour en sleep");
+}
+
 static void go_to_sleep()
 {
     // Coupe les rails PMU : l'écran hiberné conserve son image sans alimentation
     pmu_disable_rails();
     SPI.end();
 
-    Serial.println("Deep sleep 24h...");
+    Serial.println("Deep sleep 24h (réveil possible via bouton KEY)...");
     Serial.flush();
     delay(100);
 
+    // Réveil par bouton KEY (GPIO 4, actif bas) ou par timer 24h
+    pinMode(BTN_KEY, INPUT_PULLUP);
+    esp_sleep_enable_ext1_wakeup(1ULL << BTN_KEY, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
     esp_deep_sleep_start();
 }
