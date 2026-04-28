@@ -107,21 +107,30 @@ static String lastCheckStr = "";
 // ─────────────────────────────────────────────────────────────────────────────
 void setup()
 {
-    Serial.begin(115200);
-    unsigned long t0 = millis();
-    while (!Serial && (millis() - t0) < 3000);
-    delay(100);
+    // ── LEDs en premier — nécessaire pour le signal d'attente moniteur série ──
+    pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
+    pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
 
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     bool fromSleep  = (cause == ESP_SLEEP_WAKEUP_TIMER);
     bool fromButton = (cause == ESP_SLEEP_WAKEUP_EXT1);
+
+    Serial.begin(115200);
+    if (fromButton) {
+        // L'USB CDC perd la connexion en deep sleep — clignotement vert 5s
+        // pour laisser le temps de rouvrir le moniteur série dans l'IDE
+        for (int i = 0; i < 10; i++) {
+            digitalWrite(LED_GREEN, LOW);  delay(150);
+            digitalWrite(LED_GREEN, HIGH); delay(350);
+        }
+    }
+    unsigned long t0 = millis();
+    while (!Serial && (millis() - t0) < 2000);
+    delay(200);
+
     Serial.println(fromButton ? "\n=== Réveil bouton KEY — Strava check ===" :
                    fromSleep  ? "\n=== Réveil deep sleep — Strava check ===" :
                                 "\n=== Démarrage initial — Strava Last Activity ===");
-
-    // ── LEDs ──────────────────────────────────────────────────────────────────
-    pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
-    pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
     led_blink(LED_GREEN, fromButton ? 2 : (fromSleep ? 1 : 3), 150);
 
     // ── Broches EPD — états initiaux avant tout init SPI ─────────────────────
