@@ -29,7 +29,7 @@
 #include <GxEPD2_7C.h>
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
-#include <esp_sleep.h>
+
 
 #include "pins.h"
 #include "secrets.h"
@@ -40,7 +40,6 @@ Preferences       prefs;
 GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT> display(
     GxEPD2_730c_GDEP073E01(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
-#define SLEEP_DURATION_US  (24ULL * 3600ULL * 1000000ULL)   // 24h en microsecondes
 #define TZ_OFFSET_SEC      7200    // CEST (UTC+2, France heure d'ete)
 #define MAX_STREAM_PTS     200
 
@@ -96,31 +95,21 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
-static void   go_to_sleep();
 
 static String lastCheckStr = "";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Chaque réveil exécute setup() depuis le début — deep_sleep_start() à la fin.
-// loop() n'est jamais atteint en fonctionnement normal.
-// ─────────────────────────────────────────────────────────────────────────────
 void setup()
 {
     Serial.begin(115200);
     unsigned long t0 = millis();
     while (!Serial && (millis() - t0) < 3000);
     delay(100);
-
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool fromSleep = (cause == ESP_SLEEP_WAKEUP_TIMER);
-    Serial.println(fromSleep
-        ? "\n=== Réveil deep sleep — Strava check ==="
-        : "\n=== Démarrage initial — Strava Last Activity ===");
+    Serial.println("\n=== Strava Last Activity — démarrage ===");
 
     // ── LEDs ──────────────────────────────────────────────────────────────────
     pinMode(LED_GREEN, OUTPUT); digitalWrite(LED_GREEN, HIGH);
     pinMode(LED_RED,   OUTPUT); digitalWrite(LED_RED,   HIGH);
-    led_blink(LED_GREEN, fromSleep ? 1 : 3, 150);
+    led_blink(LED_GREEN, 3, 150);
 
     // ── Broches EPD — états initiaux avant tout init SPI ─────────────────────
     pinMode(EPD_RST,  OUTPUT); digitalWrite(EPD_RST, HIGH);
@@ -131,95 +120,63 @@ void setup()
     // ── PMU — alimente l'écran via ALDO1-4, doit précéder tout init SPI ──────
     pmu_init();
     delay(2000);
-
-    // ── Lecture de l'état en cache ────────────────────────────────────────────
-    prefs.begin("strava_cache", true);
-    int64_t cachedId = prefs.getLong64("id", 0);
-    bool    hasCache = prefs.isKey("name");
-    lastCheckStr     = prefs.getString("lastcheck", "");
-    prefs.end();
-    Serial.print("  Cache : "); Serial.print(hasCache ? "OK" : "vide");
-    Serial.print("  ID: "); Serial.println((long long)cachedId);
-
-    // ── WiFi + NTP + Strava ───────────────────────────────────────────────────
-    Activity act;
-    bool     needDraw = false;
-    String   gpsError = "";
-
-    if (!wifi_connect()) {
-        if (!hasCache) {
-            // Premier démarrage sans réseau : afficher l'erreur
-            gpsError = "WiFi impossible";
-            needDraw = true;
-        } else {
-            Serial.println("WiFi KO — cache disponible, pas de redessin");
-        }
-    } else {
-        String t = ntp_get_time_str();
-        if (!t.isEmpty()) { lastCheckStr = t; save_last_check(); }
-
-        String token = strava_get_token();
-        if (token.isEmpty()) {
-            if (!hasCache) { gpsError = "Token Strava invalide"; needDraw = true; }
-        } else {
-            if (!strava_fetch_last(token, act)) {
-                if (!hasCache) { gpsError = "Erreur API Strava"; needDraw = true; }
-            } else if (act.id != cachedId) {
-                Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
-                strava_fetch_streams(token, act);
-                save_activity_cache(act);
-                needDraw = true;
-            } else {
-                Serial.println("Meme activite (ID identique) — pas de redessin");
-            }
-        }
-        wifi_disconnect();
-    }
-
-    // ── Redessin si nécessaire ────────────────────────────────────────────────
-    if (needDraw) {
-        Serial.println("Init afficheur...");
-        display_init();
-        led_blink(LED_GREEN, 2, 100);
-
-        if (!gpsError.isEmpty()) {
-            Activity cached;
-            if (!load_activity_cache(cached)) {
-                draw_error(gpsError.c_str(), "Aucune donnee en cache");
-            } else {
-                Serial.println("Affichage cache avec erreur reseau...");
-                draw_activity(cached, gpsError);
-            }
-        } else {
-            Serial.println("Dessin en cours (~30-40s)...");
-            draw_activity(act, "");
-        }
-        Serial.println("[OK] Dessin termine — image conservee sans alimentation");
-        led_blink(LED_RED, 2, 200);
-    }
-
-    go_to_sleep();
 }
 
 void loop()
 {
-    // Ne devrait jamais etre atteint — deep sleep dans setup()
-    delay(10000);
-}
+    Serial.println("\n--- Cycle Strava ---");
 
-// ─────────────────────────────────────────────────────────────────────────────
-static void go_to_sleep()
-{
-    // Coupe les rails PMU : l'écran hiberné conserve son image sans alimentation
-    pmu_disable_rails();
-    SPI.end();
+    // ── WiFi + NTP + Strava ───────────────────────────────────────────────────
+    Activity act;
+    String   gpsError = "";
 
-    Serial.println("Deep sleep 24h...");
-    Serial.flush();
-    delay(100);
+    if (!wifi_connect()) {
+        Activity cached;
+        if (load_activity_cache(cached)) {
+            Serial.println("WiFi KO — affichage cache");
+            display_init();
+            draw_activity(cached, "WiFi KO");
+        } else {
+            display_init();
+            draw_error("WiFi impossible", "Aucune donnee en cache");
+        }
+        return;
+    }
 
-    esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
-    esp_deep_sleep_start();
+    String t = ntp_get_time_str();
+    if (!t.isEmpty()) { lastCheckStr = t; save_last_check(); }
+
+    String token = strava_get_token();
+    if (token.isEmpty()) {
+        gpsError = "Token Strava invalide";
+    } else {
+        if (!strava_fetch_last(token, act)) {
+            gpsError = "Erreur API Strava";
+        } else {
+            strava_fetch_streams(token, act);
+            save_activity_cache(act);
+        }
+    }
+    wifi_disconnect();
+
+    // ── Redessin systématique ─────────────────────────────────────────────────
+    Serial.println("Init afficheur...");
+    display_init();
+    led_blink(LED_GREEN, 2, 100);
+
+    if (!gpsError.isEmpty()) {
+        Activity cached;
+        if (!load_activity_cache(cached)) {
+            draw_error(gpsError.c_str(), "Aucune donnee en cache");
+        } else {
+            draw_activity(cached, gpsError);
+        }
+    } else {
+        Serial.println("Dessin en cours (~30-40s)...");
+        draw_activity(act, "");
+    }
+    Serial.println("[OK] Dessin termine");
+    led_blink(LED_RED, 2, 200);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
