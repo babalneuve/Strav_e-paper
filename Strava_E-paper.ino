@@ -96,7 +96,7 @@ static String fmt_speed(float kph);
 static String parse_date(const String& iso);
 static String translate_type(const String& type);
 static void   led_blink(uint8_t pin, int times, int period_ms);
-static void   wait_for_button_press();
+static void   strava_check(int64_t& cachedId, bool& hasCache);
 static void   go_to_sleep();
 
 static String lastCheckStr = "";
@@ -143,14 +143,38 @@ void setup()
     Serial.print("  Cache : "); Serial.print(hasCache ? "OK" : "vide");
     Serial.print("  ID: "); Serial.println((long long)cachedId);
 
-    // ── WiFi + NTP + Strava ───────────────────────────────────────────────────
+    if (fromButton) {
+        // Attendre relachement du bouton de réveil avant de démarrer la boucle
+        pinMode(BTN_KEY, INPUT_PULLUP);
+        while (digitalRead(BTN_KEY) == LOW) delay(10);
+        delay(200);
+        // Boucle — tourne jusqu'au prochain appui bouton
+        do {
+            strava_check(cachedId, hasCache);
+        } while (digitalRead(BTN_KEY) == HIGH);
+        delay(50);
+    } else {
+        strava_check(cachedId, hasCache);
+    }
+
+    go_to_sleep();
+}
+
+void loop()
+{
+    // Ne devrait jamais etre atteint — deep sleep dans setup()
+    delay(10000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+static void strava_check(int64_t& cachedId, bool& hasCache)
+{
     Activity act;
     bool     needDraw = false;
     String   gpsError = "";
 
     if (!wifi_connect()) {
         if (!hasCache) {
-            // Premier démarrage sans réseau : afficher l'erreur
             gpsError = "WiFi impossible";
             needDraw = true;
         } else {
@@ -170,6 +194,8 @@ void setup()
                 Serial.print("Nouvelle activite ! ID: "); Serial.println((long long)act.id);
                 strava_fetch_streams(token, act);
                 save_activity_cache(act);
+                cachedId = act.id;
+                hasCache = true;
                 needDraw = true;
             } else {
                 Serial.println("Meme activite (ID identique) — pas de redessin");
@@ -178,7 +204,6 @@ void setup()
         wifi_disconnect();
     }
 
-    // ── Redessin si nécessaire ────────────────────────────────────────────────
     if (needDraw) {
         Serial.println("Init afficheur...");
         display_init();
@@ -199,32 +224,6 @@ void setup()
         Serial.println("[OK] Dessin termine — image conservee sans alimentation");
         led_blink(LED_RED, 2, 200);
     }
-
-    if (fromButton) wait_for_button_press();
-    go_to_sleep();
-}
-
-void loop()
-{
-    // Ne devrait jamais etre atteint — deep sleep dans setup()
-    delay(10000);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-static void wait_for_button_press()
-{
-    pinMode(BTN_KEY, INPUT_PULLUP);
-    Serial.println("Attente appui KEY pour retourner en sleep...");
-    // Attendre relachement si bouton encore enfonce apres le réveil
-    while (digitalRead(BTN_KEY) == LOW) delay(10);
-    delay(200);
-    // Clignotement lent LED verte = en attente
-    while (digitalRead(BTN_KEY) == HIGH) {
-        digitalWrite(LED_GREEN, LOW);  delay(100);
-        digitalWrite(LED_GREEN, HIGH); delay(900);
-    }
-    delay(50);
-    Serial.println("Bouton KEY — retour en sleep");
 }
 
 static void go_to_sleep()
